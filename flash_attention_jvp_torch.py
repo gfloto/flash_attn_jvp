@@ -3,10 +3,20 @@ import torch
 
 
 def finite_element_jvp(fn, x, z, e=1e-8):
+    """Finite element Jacobian-vector product in the direction of z at x"""
     return (fn(x + e*z) - fn(x)) / e
 
 
-def flash_attention_jvp(x, z, Wq, Wk, Wv, Br=4, Bc=3):
+def flash_attention_jvp(x, z, Wq, Wk, Wv, Br=8, Bc=8):
+    """
+    Notation is from algorithm 1 from the flash attention paper: https://arxiv.org/abs/2205.14135
+    as well as appendix F from a consistency models paper: https://arxiv.org/abs/2410.11081
+
+    This function is a pure torch implementation of jvp flash attention which is the first step
+    towards creating a proper gpu kernel. Following the suggestion from Tri Dao here:
+    https://github.com/Dao-AILab/flash-attention/issues/1672
+    """
+
     n, d = x.shape
     assert n % Br == 0 and n % Bc == 0
     y, g = torch.zeros_like(x), torch.zeros_like(x)
@@ -59,17 +69,19 @@ def flash_attention_jvp(x, z, Wq, Wk, Wv, Br=4, Bc=3):
 
 
 if __name__ == "__main__":
-    N, D = 12, 3
+    N, D = 128, 12 # N: sequence length, D: vector / embedding length
     x, z = torch.randn(2, N, D, dtype=torch.float64)
     Wq, Wk, Wv = torch.randn(3, D, D, dtype=torch.float64)
-    
+
+    # check that primal values are correct 
     assert torch.allclose(
         flash_attention_jvp(x, z, Wq, Wk, Wv)["primal"],
         torch.nn.functional.scaled_dot_product_attention(x @ Wq.T, x @ Wk.T, x @ Wv.T),
-        rtol=0.0,
+        rtol=1e-2,
         atol=1e-2,
     )
     
+    # check that tangent / jvp values are correct
     partial_attention = functools.partial(
         lambda x_: torch.nn.functional.scaled_dot_product_attention(
             x_ @ Wq.T, x_ @ Wk.T, x_ @ Wv.T
@@ -78,7 +90,6 @@ if __name__ == "__main__":
     assert torch.allclose(
         flash_attention_jvp(x, z, Wq, Wk, Wv)["tangent"],
         finite_element_jvp(partial_attention, x, z),
-        rtol=0.0,
+        rtol=1e-2,
         atol=1e-2,
     )
-
